@@ -26,13 +26,7 @@ from app.models import (
 )
 from app.scraper import coletar_dados_cliente
 from app.simulador import processar_cliente
-from app.ghl import (
-    criar_oportunidade,
-    atualizar_contact_fields,
-    adicionar_tag,
-    enviar_whatsapp,
-    formatar_mensagem_whatsapp,
-)
+from app.ghl import atualizar_contato_simulacao, adicionar_tag
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,9 +36,6 @@ logger = logging.getLogger(__name__)
 
 # Storage em memoria para jobs (para producao, usar Redis)
 jobs: dict[str, StatusJob] = {}
-
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-ENVIAR_WHATSAPP_AUTO = os.getenv("ENVIAR_WHATSAPP_AUTO", "false").lower() == "true"
 
 
 @asynccontextmanager
@@ -57,7 +48,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Floracred Portabilidade API",
     description="API para scraping do Sistema Corban, simulacao de portabilidade e integracao GHL",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -82,28 +73,27 @@ async def health():
 async def processar_cpf(req: ProcessarClienteRequest):
     """
     Recebe 1 CPF, faz scraping, aplica regras, gera simulacoes.
-    Opcionalmente cria oportunidade na GHL e envia WhatsApp.
+    Atualiza custom fields na GHL:
+    - Possibilidade Portabilidade = Sim/Nao
+    - Valor Liberado Total
+    - Resumo Simulacao (detalhamento por parcela)
     """
     logger.info(f"Processando CPF (contact_id={req.contact_id})")
 
     # 1. Scraping (roda em thread separada para nao bloquear o event loop)
     dados = await asyncio.to_thread(coletar_dados_cliente, req.cpf)
 
-    # 2. Simulacao
+    # 2. Simulacao com regras e prioridade de bancos
     resultado = processar_cliente(dados, contact_id=req.contact_id)
 
-    # 3. Integracao GHL (se tiver contact_id)
-    if req.contact_id and resultado.simulacoes:
-        await atualizar_contact_fields(req.contact_id, resultado)
-        await criar_oportunidade(resultado, req.pipeline_id, req.stage_id)
-        await adicionar_tag(req.contact_id, ["simulacao-portabilidade"])
+    # 3. Atualizar GHL (se tiver contact_id)
+    if req.contact_id:
+        await atualizar_contato_simulacao(req.contact_id, resultado)
 
-        if ENVIAR_WHATSAPP_AUTO:
-            msg = formatar_mensagem_whatsapp(resultado)
-            if msg:
-                await enviar_whatsapp(req.contact_id, msg)
-    elif req.contact_id and not resultado.simulacoes:
-        await adicionar_tag(req.contact_id, ["sem-portabilidade"])
+        if resultado.simulacoes_por_emprestimo:
+            await adicionar_tag(req.contact_id, ["simulacao-portabilidade"])
+        else:
+            await adicionar_tag(req.contact_id, ["sem-portabilidade"])
 
     return resultado
 
@@ -124,12 +114,7 @@ async def processar_lista(req: ProcessarListaRequest, bg: BackgroundTasks):
     )
     jobs[job_id] = job
 
-    bg.add_task(
-        _processar_lista_background,
-        job_id,
-        req.clientes,
-        req.pipeline_id,
-    )
+    bg.add_task(_processar_lista_background, job_id, req.clientes)
 
     logger.info(f"Job {job_id} criado com {len(req.clientes)} CPFs")
     return {"job_id": job_id, "total": len(req.clientes), "status": "processando"}
@@ -138,7 +123,6 @@ async def processar_lista(req: ProcessarListaRequest, bg: BackgroundTasks):
 async def _processar_lista_background(
     job_id: str,
     clientes: list[ProcessarClienteRequest],
-    pipeline_id: str | None,
 ):
     """Processa lista de CPFs sequencialmente em background."""
     job = jobs[job_id]
@@ -151,17 +135,13 @@ async def _processar_lista_background(
             resultado = processar_cliente(dados, contact_id=cliente.contact_id)
 
             # GHL
-            if cliente.contact_id and resultado.simulacoes:
-                await atualizar_contact_fields(cliente.contact_id, resultado)
-                await criar_oportunidade(resultado, pipeline_id, cliente.stage_id)
-                await adicionar_tag(cliente.contact_id, ["simulacao-portabilidade"])
+            if cliente.contact_id:
+                await atualizar_contato_simulacao(cliente.contact_id, resultado)
 
-                if ENVIAR_WHATSAPP_AUTO:
-                    msg = formatar_mensagem_whatsapp(resultado)
-                    if msg:
-                        await enviar_whatsapp(cliente.contact_id, msg)
-            elif cliente.contact_id and not resultado.simulacoes:
-                await adicionar_tag(cliente.contact_id, ["sem-portabilidade"])
+                if resultado.simulacoes_por_emprestimo:
+                    await adicionar_tag(cliente.contact_id, ["simulacao-portabilidade"])
+                else:
+                    await adicionar_tag(cliente.contact_id, ["sem-portabilidade"])
 
             job.resultados.append(resultado)
             job.processados += 1
@@ -177,7 +157,7 @@ async def _processar_lista_background(
             )
             job.processados += 1
 
-        # Pequena pausa entre clientes para nao sobrecarregar o Corban
+        # Pausa entre clientes para nao sobrecarregar o Corban
         await asyncio.sleep(2)
 
     job.status = StatusProcessamento.CONCLUIDO

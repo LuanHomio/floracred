@@ -1,34 +1,28 @@
 """
-Integracao com GoHighLevel (GHL) via API REST.
+Integracao com GoHighLevel (GHL) via PIT (Private Integration Token).
 
-Funcionalidades:
-- Criar/atualizar oportunidades com dados das simulacoes
-- Atualizar custom fields do contato
-- Enviar mensagem WhatsApp (via SMS custom provider)
+Fluxo:
+1. Atualiza custom fields do contato com resultado da simulacao
+2. Seta "Possibilidade Portabilidade" = "Sim" ou "Nao"
+3. A automacao na GHL e disparada pelo trigger do campo alterado
 """
 
 import os
 import logging
 import httpx
 
-from app.models import ResultadoCliente, Simulacao
+from app.models import ResultadoCliente
 
 logger = logging.getLogger(__name__)
 
 GHL_API_BASE = "https://services.leadconnectorhq.com"
-GHL_API_KEY = os.getenv("GHL_API_KEY", "")
-GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "")
-GHL_PIPELINE_ID = os.getenv("GHL_PIPELINE_ID", "")
-GHL_STAGE_ID = os.getenv("GHL_STAGE_ID", "")  # Stage para simulacoes prontas
+GHL_API_KEY = os.getenv("GHL_API_KEY", "")  # PIT Token
+GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "HKZiiyzTHht8LVylD97r")
 
-# Custom field keys (configurar na GHL)
-CF_VALOR_LIBERADO = os.getenv("GHL_CF_VALOR_LIBERADO", "")
-CF_BANCO_DESTINO = os.getenv("GHL_CF_BANCO_DESTINO", "")
-CF_BANCO_ORIGEM = os.getenv("GHL_CF_BANCO_ORIGEM", "")
-CF_PARCELA_ATUAL = os.getenv("GHL_CF_PARCELA_ATUAL", "")
-CF_SALDO_DEVEDOR = os.getenv("GHL_CF_SALDO_DEVEDOR", "")
-CF_TOTAL_FINANCIADO = os.getenv("GHL_CF_TOTAL_FINANCIADO", "")
-CF_SIMULACAO_RESUMO = os.getenv("GHL_CF_SIMULACAO_RESUMO", "")
+# Custom field IDs — Floracred
+CF_POSSIBILIDADE = "Fgf8wJh0LbQ0ZLCJDQYJ"       # Possibilidade Portabilidade (RADIO: Sim/Nao)
+CF_VALOR_LIBERADO_TOTAL = "nYm9XkV76FsTiNRcJJPn"  # Valor Liberado Total (TEXT)
+CF_RESUMO_SIMULACAO = "mQIVywbqULMxSb4RhvZx"      # Resumo Simulacao (LARGE_TEXT)
 
 
 def _headers() -> dict:
@@ -39,105 +33,34 @@ def _headers() -> dict:
     }
 
 
-async def criar_oportunidade(
-    resultado: ResultadoCliente,
-    pipeline_id: str | None = None,
-    stage_id: str | None = None,
-) -> dict | None:
-    """
-    Cria uma oportunidade na GHL com os dados da melhor simulacao.
-    """
-    if not GHL_API_KEY or not resultado.contact_id:
-        logger.warning("GHL_API_KEY ou contact_id nao configurado, pulando criacao de oportunidade")
-        return None
-
-    melhor = resultado.melhor_simulacao
-    if not melhor:
-        logger.info(f"Nenhuma simulacao valida para CPF {resultado.cpf}")
-        return None
-
-    pipe = pipeline_id or GHL_PIPELINE_ID
-    stage = stage_id or GHL_STAGE_ID
-
-    # Montar custom fields
-    custom_fields = []
-    if CF_VALOR_LIBERADO:
-        custom_fields.append({"id": CF_VALOR_LIBERADO, "value": str(melhor.valor_liberado)})
-    if CF_BANCO_DESTINO:
-        custom_fields.append({"id": CF_BANCO_DESTINO, "value": melhor.banco_destino})
-    if CF_BANCO_ORIGEM:
-        custom_fields.append({"id": CF_BANCO_ORIGEM, "value": melhor.banco_origem})
-    if CF_PARCELA_ATUAL:
-        custom_fields.append({"id": CF_PARCELA_ATUAL, "value": str(melhor.valor_parcela_atual)})
-    if CF_SALDO_DEVEDOR:
-        custom_fields.append({"id": CF_SALDO_DEVEDOR, "value": str(melhor.saldo_devedor)})
-    if CF_TOTAL_FINANCIADO:
-        custom_fields.append({"id": CF_TOTAL_FINANCIADO, "value": str(melhor.total_financiado)})
-    if CF_SIMULACAO_RESUMO:
-        resumo = formatar_resumo_simulacoes(resultado)
-        custom_fields.append({"id": CF_SIMULACAO_RESUMO, "value": resumo})
-
-    payload = {
-        "pipelineId": pipe,
-        "locationId": GHL_LOCATION_ID,
-        "name": f"Portabilidade - {resultado.cpf}",
-        "status": "open",
-        "contactId": resultado.contact_id,
-        "monetaryValue": melhor.valor_liberado,
-    }
-
-    if stage:
-        payload["pipelineStageId"] = stage
-    if custom_fields:
-        payload["customFields"] = custom_fields
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{GHL_API_BASE}/opportunities/",
-                headers=_headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            opp_id = data.get("opportunity", {}).get("id")
-            logger.info(f"Oportunidade criada: {opp_id}")
-            return data
-    except Exception as e:
-        logger.error(f"Erro ao criar oportunidade: {e}")
-        return None
-
-
-async def atualizar_contact_fields(
+async def atualizar_contato_simulacao(
     contact_id: str,
     resultado: ResultadoCliente,
 ) -> dict | None:
     """
-    Atualiza custom fields do contato com dados da simulacao.
+    Atualiza o contato na GHL com os resultados da simulacao.
+    Seta Possibilidade = Sim/Nao, valor total, e resumo por parcela.
     """
     if not GHL_API_KEY or not contact_id:
+        logger.warning("GHL_API_KEY ou contact_id nao configurado")
         return None
 
-    melhor = resultado.melhor_simulacao
-    if not melhor:
-        return None
+    tem_simulacao = len(resultado.simulacoes_por_emprestimo) > 0
 
-    custom_fields = []
-    if CF_VALOR_LIBERADO:
-        custom_fields.append({"id": CF_VALOR_LIBERADO, "value": str(melhor.valor_liberado)})
-    if CF_BANCO_DESTINO:
-        custom_fields.append({"id": CF_BANCO_DESTINO, "value": melhor.banco_destino})
-    if CF_BANCO_ORIGEM:
-        custom_fields.append({"id": CF_BANCO_ORIGEM, "value": melhor.banco_origem})
-    if CF_PARCELA_ATUAL:
-        custom_fields.append({"id": CF_PARCELA_ATUAL, "value": str(melhor.valor_parcela_atual)})
-    if CF_SALDO_DEVEDOR:
-        custom_fields.append({"id": CF_SALDO_DEVEDOR, "value": str(melhor.saldo_devedor)})
-    if CF_TOTAL_FINANCIADO:
-        custom_fields.append({"id": CF_TOTAL_FINANCIADO, "value": str(melhor.total_financiado)})
-    if CF_SIMULACAO_RESUMO:
-        resumo = formatar_resumo_simulacoes(resultado)
-        custom_fields.append({"id": CF_SIMULACAO_RESUMO, "value": resumo})
+    custom_fields = [
+        {
+            "id": CF_POSSIBILIDADE,
+            "value": "Sim" if tem_simulacao else "Não",
+        },
+        {
+            "id": CF_VALOR_LIBERADO_TOTAL,
+            "value": f"R$ {resultado.valor_liberado_total:,.2f}" if tem_simulacao else "R$ 0,00",
+        },
+        {
+            "id": CF_RESUMO_SIMULACAO,
+            "value": resultado.resumo_texto if tem_simulacao else "Nenhuma portabilidade disponivel para este cliente.",
+        },
+    ]
 
     payload = {"customFields": custom_fields}
 
@@ -149,9 +72,10 @@ async def atualizar_contact_fields(
                 json=payload,
             )
             resp.raise_for_status()
+            logger.info(f"Contato {contact_id} atualizado: Possibilidade={'Sim' if tem_simulacao else 'Nao'}")
             return resp.json()
     except Exception as e:
-        logger.error(f"Erro ao atualizar contato: {e}")
+        logger.error(f"Erro ao atualizar contato {contact_id}: {e}")
         return None
 
 
@@ -174,66 +98,31 @@ async def adicionar_tag(contact_id: str, tags: list[str]) -> dict | None:
         return None
 
 
-async def enviar_whatsapp(
-    contact_id: str,
-    mensagem: str,
-) -> dict | None:
-    """
-    Envia WhatsApp via SMS custom provider na GHL.
-    """
-    if not GHL_API_KEY or not contact_id:
+async def buscar_contato_por_cpf(cpf: str) -> dict | None:
+    """Busca contato na GHL pelo CPF (custom field)."""
+    if not GHL_API_KEY:
         return None
 
-    payload = {
-        "type": "SMS",
-        "contactId": contact_id,
-        "message": mensagem,
-    }
+    # Limpar CPF para busca
+    cpf_limpo = cpf.replace(".", "").replace("-", "").replace(" ", "")
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{GHL_API_BASE}/conversations/messages",
+            resp = await client.get(
+                f"{GHL_API_BASE}/contacts/",
                 headers=_headers(),
-                json=payload,
+                params={
+                    "locationId": GHL_LOCATION_ID,
+                    "query": cpf_limpo,
+                    "limit": 1,
+                },
             )
             resp.raise_for_status()
             data = resp.json()
-            logger.info(f"WhatsApp enviado para contato {contact_id}")
-            return data
+            contatos = data.get("contacts", [])
+            if contatos:
+                return contatos[0]
+            return None
     except Exception as e:
-        logger.error(f"Erro ao enviar WhatsApp: {e}")
+        logger.error(f"Erro ao buscar contato por CPF: {e}")
         return None
-
-
-def formatar_resumo_simulacoes(resultado: ResultadoCliente) -> str:
-    """Formata um resumo textual das simulacoes para custom field."""
-    if not resultado.simulacoes:
-        return "Nenhuma simulacao disponivel"
-
-    linhas = []
-    for i, sim in enumerate(resultado.simulacoes[:5], 1):  # Top 5
-        linhas.append(
-            f"{i}. {sim.banco_origem} -> {sim.banco_destino}: "
-            f"Liberado R${sim.valor_liberado:,.2f} "
-            f"(Parcela R${sim.valor_parcela_atual:,.2f} | "
-            f"Saldo R${sim.saldo_devedor:,.2f})"
-        )
-    return "\n".join(linhas)
-
-
-def formatar_mensagem_whatsapp(resultado: ResultadoCliente) -> str:
-    """Formata a mensagem de WhatsApp com a melhor simulacao."""
-    melhor = resultado.melhor_simulacao
-    if not melhor:
-        return ""
-
-    return (
-        f"Ola! Temos uma oportunidade especial para voce.\n\n"
-        f"Identificamos que voce pode fazer a portabilidade do seu "
-        f"emprestimo consignado do {melhor.banco_origem} para o {melhor.banco_destino}.\n\n"
-        f"Parcela atual: R$ {melhor.valor_parcela_atual:,.2f}\n"
-        f"Saldo devedor: R$ {melhor.saldo_devedor:,.2f}\n"
-        f"Valor que pode ser liberado: R$ {melhor.valor_liberado:,.2f}\n\n"
-        f"Deseja saber mais? Responda esta mensagem!"
-    )

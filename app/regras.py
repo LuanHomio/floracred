@@ -29,6 +29,7 @@ BANCOS_CIP = {
 @dataclass
 class RegraPortabilidade:
     nome: str
+    prioridade: int = 99  # Menor = maior prioridade. Daycoval = 1
     ativo: bool = True
     # {codigo_banco_origem: parcelas_minimas} — None = aceita todos com o min padrao
     bancos_portados: dict | None = None
@@ -55,6 +56,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 1. Banrisul ───────────────────────────────────────
     "banrisul": RegraPortabilidade(
         nome="Banrisul",
+        prioridade=3,
         bancos_portados={
             "012": 12,   # INBURSA
             "935": 12,   # FACTA
@@ -88,6 +90,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 3. Daycoval ───────────────────────────────────────
     "daycoval": RegraPortabilidade(
         nome="Banco Daycoval",
+        prioridade=1,  # BANCO PRINCIPAL
         parcelas_minimas_padrao=6,
         bancos_portados={
             "935": 24,   # FACTA
@@ -120,6 +123,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 5. Banco PAN ──────────────────────────────────────
     "pan": RegraPortabilidade(
         nome="Banco PAN",
+        prioridade=5,
         parcelas_minimas_padrao=20,
         bancos_portados={
             "626": 24,   # C6
@@ -141,6 +145,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 6. Safra ──────────────────────────────────────────
     "safra": RegraPortabilidade(
         nome="Safra",
+        prioridade=4,
         bancos_nao_portados=[
             "707",  # DAYCOVAL
             "012",  # INBURSA
@@ -169,6 +174,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 7. C6 ─────────────────────────────────────────────
     "c6": RegraPortabilidade(
         nome="C6",
+        prioridade=6,
         parcelas_minimas_padrao=13,  # BYX 13 pagas como padrao CIP
         bancos_portados={
             "029": 25,   # ITAU CONSIGNADO
@@ -203,6 +209,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 8. Facta ──────────────────────────────────────────
     "facta": RegraPortabilidade(
         nome="Facta",
+        prioridade=2,
         bancos_portados={
             "121": 15,   # AGIBANK
             "626": 12,   # C6
@@ -241,6 +248,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 9. Digio ──────────────────────────────────────────
     "digio": RegraPortabilidade(
         nome="Digio",
+        prioridade=7,
         parcelas_minimas_padrao=12,
         bancos_portados={
             "029": 25,   # ITAU CONSIGNADO
@@ -268,6 +276,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 10. BMG ───────────────────────────────────────────
     "bmg": RegraPortabilidade(
         nome="BMG",
+        prioridade=8,
         bancos_portados={
             "422": 12,   # SAFRA
             "707": 15,   # DAYCOVAL
@@ -297,6 +306,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 11. Happy Consig ──────────────────────────────────
     "happy": RegraPortabilidade(
         nome="Happy Consig",
+        prioridade=9,
         bancos_nao_portados=[
             "643",  # PINE
             "935",  # FACTA
@@ -322,6 +332,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 12. BRB ───────────────────────────────────────────
     "brb": RegraPortabilidade(
         nome="BRB",
+        prioridade=10,
         parcelas_minimas_padrao=12,
         bancos_portados={
             "029": 25,   # ITAU CONSIGNADO
@@ -352,6 +363,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 13. Inbursa ───────────────────────────────────────
     "inbursa": RegraPortabilidade(
         nome="Inbursa",
+        prioridade=11,
         bancos_portados={
             "707": 13,   # DAYCOVAL
             "623": 25,   # PAN
@@ -383,6 +395,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 14. Finanlo Bank ──────────────────────────────────
     "finanlo": RegraPortabilidade(
         nome="Finanlo Bank",
+        prioridade=12,
         bancos_portados={
             "033": 12,   # SANTANDER
             "389": 12,   # MERCANTIL
@@ -421,6 +434,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 15. Prospecta Fintech ─────────────────────────────
     "prospecta": RegraPortabilidade(
         nome="Prospecta Fintech",
+        prioridade=13,
         parcelas_minimas_padrao=1,  # demais bancos a partir de 1 paga
         bancos_portados={
             "033": 13,   # SANTANDER
@@ -459,6 +473,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 16. PicPay ────────────────────────────────────────
     "picpay": RegraPortabilidade(
         nome="PicPay",
+        prioridade=14,
         bancos_portados={
             "623": 25,   # PAN
             "029": 25,   # ITAU 029
@@ -487,6 +502,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 17. Icred ─────────────────────────────────────────
     "icred": RegraPortabilidade(
         nome="Icred",
+        prioridade=15,
         bancos_portados={
             "623": 25,   # PAN
             "029": 25,   # ITAU 029
@@ -514,6 +530,7 @@ REGRAS: dict[str, RegraPortabilidade] = {
     # ── 18. BRB Consig 360 ────────────────────────────────
     "brb_consig_360": RegraPortabilidade(
         nome="BRB Consig 360",
+        prioridade=16,
         parcelas_minimas_padrao=12,  # consignaveis a partir de 12
         # Bancos de rede com 1 paga (tratado na logica)
         bancos_nao_portados=[

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 from enum import Enum
 
@@ -8,14 +8,10 @@ from enum import Enum
 class ProcessarClienteRequest(BaseModel):
     cpf: str
     contact_id: Optional[str] = None  # ID do contato na GHL
-    pipeline_id: Optional[str] = None
-    stage_id: Optional[str] = None
 
 
 class ProcessarListaRequest(BaseModel):
     clientes: list[ProcessarClienteRequest]
-    pipeline_id: Optional[str] = None
-    stage_id: Optional[str] = None
 
 
 # ── Dados coletados do Sistema Corban ─────────────────────
@@ -48,6 +44,7 @@ class DadosCliente(BaseModel):
 class Simulacao(BaseModel):
     banco_origem: str
     banco_destino: str
+    prioridade_banco: int  # Prioridade do banco destino (1 = Daycoval)
     codigo_banco_origem: str
     valor_parcela_atual: float
     saldo_devedor: float
@@ -60,13 +57,23 @@ class Simulacao(BaseModel):
     motivos_rejeicao: list[str] = []
 
 
+class SimulacaoEmprestimo(BaseModel):
+    """Resultado da simulacao para UM emprestimo especifico."""
+    indice: int  # Numero do emprestimo (1, 2, 3...)
+    emprestimo: Emprestimo
+    melhor_simulacao: Optional[Simulacao] = None  # Melhor banco destino (por prioridade)
+    todas_simulacoes: list[Simulacao] = []  # Todas as opcoes validas
+    valor_liberado: float = 0  # Valor liberado da melhor opcao
+
+
 class ResultadoCliente(BaseModel):
     cpf: str
     contact_id: Optional[str] = None
     beneficio: Optional[DadosBeneficio] = None
     emprestimos_encontrados: int = 0
-    simulacoes: list[Simulacao] = []
-    melhor_simulacao: Optional[Simulacao] = None
+    simulacoes_por_emprestimo: list[SimulacaoEmprestimo] = []
+    valor_liberado_total: float = 0  # Soma de todos os emprestimos
+    resumo_texto: str = ""  # Texto formatado para custom field
     erro: Optional[str] = None
 
 
