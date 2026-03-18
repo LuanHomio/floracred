@@ -2,9 +2,7 @@ import os
 import time
 import logging
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -19,27 +17,24 @@ CORBAN_USER = os.getenv("CORBAN_USER", "")
 CORBAN_PASS = os.getenv("CORBAN_PASS", "")
 
 
-def create_driver() -> webdriver.Chrome:
-    options = Options()
+def create_driver() -> uc.Chrome:
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
 
-    # No Docker, o chromedriver fica no PATH
     chrome_bin = os.getenv("CHROME_BIN")
     if chrome_bin:
         options.binary_location = chrome_bin
 
-    driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(30)
+    driver = uc.Chrome(options=options, version_main=None)
+    driver.set_page_load_timeout(60)
     return driver
 
 
-def login(driver: webdriver.Chrome) -> None:
+def login(driver: uc.Chrome) -> None:
     logger.info("Acessando pagina de login")
     driver.get(LOGIN_URL)
     wait = WebDriverWait(driver, 20)
@@ -84,7 +79,7 @@ def login(driver: webdriver.Chrome) -> None:
     logger.info("Login concluido")
 
 
-def buscar_por_cpf(driver: webdriver.Chrome, cpf: str) -> None:
+def buscar_por_cpf(driver: uc.Chrome, cpf: str) -> None:
     wait = WebDriverWait(driver, 20)
     search_input = wait.until(
         EC.element_to_be_clickable((By.ID, "dataToReceptivo"))
@@ -100,7 +95,7 @@ def buscar_por_cpf(driver: webdriver.Chrome, cpf: str) -> None:
     time.sleep(3)
 
 
-def selecionar_primeiro_beneficio(driver: webdriver.Chrome) -> None:
+def selecionar_primeiro_beneficio(driver: uc.Chrome) -> None:
     wait = WebDriverWait(driver, 20)
     beneficio_button = wait.until(
         EC.element_to_be_clickable(
@@ -112,7 +107,7 @@ def selecionar_primeiro_beneficio(driver: webdriver.Chrome) -> None:
     time.sleep(3)
 
 
-def visualizar_dados_cliente(driver: webdriver.Chrome) -> None:
+def visualizar_dados_cliente(driver: uc.Chrome) -> None:
     wait = WebDriverWait(driver, 20)
     visualizar_button = wait.until(
         EC.element_to_be_clickable((By.ID, "btnOcultar"))
@@ -121,7 +116,7 @@ def visualizar_dados_cliente(driver: webdriver.Chrome) -> None:
     time.sleep(2)
 
 
-def coletar_dados_beneficio(driver: webdriver.Chrome) -> DadosBeneficio:
+def coletar_dados_beneficio(driver: uc.Chrome) -> DadosBeneficio:
     wait = WebDriverWait(driver, 20)
     dados = DadosBeneficio()
 
@@ -156,7 +151,7 @@ def coletar_dados_beneficio(driver: webdriver.Chrome) -> DadosBeneficio:
     return dados
 
 
-def coletar_emprestimos(driver: webdriver.Chrome) -> list[Emprestimo]:
+def coletar_emprestimos(driver: uc.Chrome) -> list[Emprestimo]:
     wait = WebDriverWait(driver, 20)
     emprestimos = []
 
