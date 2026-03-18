@@ -1,16 +1,18 @@
 """
 Coleta de dados do Sistema Corban via API HTTP.
 
-Fluxo:
-1. Login no gestao.sistemacorban.com.br → obter PHPSESSID
-2. GET /index.php/index/verificarlogin → confirmar sessao
-3. POST services.sistemacorban.com.br/consulta-inss/consultar → dados completos
-
-Sem Selenium, sem Chrome, sem Cloudflare.
+Fluxo validado:
+1. POST /index.php/auth/login (com usuario + senha) -> PHPSESSID
+2. POST /index.php/receptivo/consultar-cliente (cpf + nb) -> pega CSRF token
+3. POST /index.php/receptivo/consultar-cliente (nb + csrf) -> JWT com cliente_nb
+4. POST services.../consulta-inss/consultar (Bearer JWT) -> dados completos
 """
 
 import os
+import re
+import json
 import logging
+import base64
 import httpx
 
 from app.models import DadosBeneficio, Emprestimo, DadosCliente
@@ -19,186 +21,153 @@ logger = logging.getLogger(__name__)
 
 GESTAO_BASE = "https://gestao.sistemacorban.com.br"
 SERVICES_BASE = "https://services.sistemacorban.com.br"
-LOGIN_URL = f"{GESTAO_BASE}/index.php/auth/login"
 
 CORBAN_USER = os.getenv("CORBAN_USER", "")
 CORBAN_PASS = os.getenv("CORBAN_PASS", "")
-AGENCIA = os.getenv("CORBAN_AGENCIA", "25599")
 
-# Headers que imitam um browser real
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
     "X-Requested-With": "XMLHttpRequest",
-    "Sec-Ch-Ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 
-async def _login(client: httpx.AsyncClient) -> str | None:
-    """
-    Faz login no Sistema Corban e retorna o token de sessao.
-    O PHPSESSID e mantido automaticamente pelo client (cookies).
-    """
-    # 1. Acessar pagina de login (pegar cookies iniciais)
-    logger.info("Acessando pagina de login")
-    await client.get(LOGIN_URL, headers=BROWSER_HEADERS)
+async def _login(client: httpx.AsyncClient) -> bool:
+    """Login no Sistema Corban. Retorna True se ok."""
+    logger.info("Fazendo login no Sistema Corban")
+    await client.get(f"{GESTAO_BASE}/index.php/auth/login", headers=BROWSER_HEADERS)
+    r = await client.post(
+        f"{GESTAO_BASE}/index.php/auth/login",
+        data={"exten": CORBAN_USER, "password": CORBAN_PASS},
+        headers={**BROWSER_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=True,
+    )
+    if r.status_code == 200 and "PHPSESSID" in {c.name for c in client.cookies.jar}:
+        logger.info("Login OK")
+        return True
+    logger.error(f"Login falhou: status {r.status_code}")
+    return False
 
-    # 2. POST login com credenciais
-    login_data = {
-        "exten": CORBAN_USER,
-        "password": CORBAN_PASS,
-    }
-    logger.info("Enviando credenciais")
-    resp = await client.post(
-        LOGIN_URL,
-        data=login_data,
+
+async def _obter_jwt(client: httpx.AsyncClient, cpf: str, nb: str) -> str:
+    """
+    Obtem JWT com cliente_nb para consulta INSS.
+    Requer 2 POSTs: primeiro pega CSRF, segundo pega JWT.
+    """
+    # Primeiro POST: pegar CSRF token
+    r = await client.post(
+        f"{GESTAO_BASE}/index.php/receptivo/consultar-cliente",
+        data={"beneficio": nb, "cpfcli": cpf},
+        headers={**BROWSER_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=True,
+    )
+    csrf_match = re.search(
+        r'name=["\']token_verification["\'][^>]*value=["\']([^"\' ]+)', r.text
+    )
+    if not csrf_match:
+        logger.error("CSRF token nao encontrado")
+        return ""
+
+    csrf = csrf_match.group(1)
+    logger.info(f"CSRF token obtido")
+
+    # Segundo POST: com CSRF -> JWT com cliente_nb
+    r = await client.post(
+        f"{GESTAO_BASE}/index.php/receptivo/consultar-cliente",
+        data={"beneficio": nb, "cpfcli3": "", "token_verification": csrf},
         headers={**BROWSER_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
         follow_redirects=True,
     )
 
-    if resp.status_code != 200:
-        logger.error(f"Login falhou: status {resp.status_code}")
-        return None
-
-    # 3. Verificar login
-    logger.info("Verificando login")
-    resp = await client.get(
-        f"{GESTAO_BASE}/index.php/index/verificarlogin",
-        headers={**BROWSER_HEADERS, "Referer": f"{GESTAO_BASE}/index.php/receptivo"},
-    )
-
-    if resp.status_code == 200:
-        data = resp.json()
-        token = data.get("token", "")
-        if token:
-            logger.info("Login confirmado")
-            return token
-
-    logger.error(f"Verificacao de login falhou: {resp.status_code}")
-    return None
-
-
-async def _consultar_inss(
-    client: httpx.AsyncClient,
-    cpf: str,
-    bearer_token: str,
-) -> dict | None:
-    """
-    Consulta dados do INSS via API services.sistemacorban.com.br.
-    Retorna o JSON completo com beneficiario, emprestimos, etc.
-    """
-    headers = {
-        **BROWSER_HEADERS,
-        "Authorization": f"Bearer {bearer_token}",
-        "Origin": GESTAO_BASE,
-        "Referer": f"{GESTAO_BASE}/index.php/receptivo",
-        "Sec-Fetch-Site": "same-site",
-    }
-
-    logger.info("Consultando INSS via API")
-    resp = await client.post(
-        f"{SERVICES_BASE}/consulta-inss/consultar",
-        headers=headers,
-    )
-
-    if resp.status_code == 200:
-        return resp.json()
-
-    logger.error(f"Consulta INSS falhou: status {resp.status_code}")
-    return None
-
-
-async def _buscar_e_consultar(
-    client: httpx.AsyncClient,
-    cpf: str,
-) -> dict | None:
-    """
-    Busca CPF no receptivo e inicia a consulta INSS.
-    Tenta diferentes abordagens para obter os dados.
-    """
-    # Primeiro, salvar consulta do cliente (como o frontend faz)
-    headers = {
-        **BROWSER_HEADERS,
-        "Referer": f"{GESTAO_BASE}/index.php/receptivo",
-    }
-
-    # Buscar via consultar com agencia
-    logger.info(f"Buscando CPF via consultar")
-    resp = await client.get(
-        f"{GESTAO_BASE}/index.php/receptivo/consultar",
-        params={"agencia": AGENCIA},
-        headers=headers,
-    )
-
-    # Salvar consulta do cliente
-    await client.post(
-        f"{GESTAO_BASE}/index.php/receptivo/salvar-consulta-cliente",
-        data={"cpf": cpf, "agencia": AGENCIA},
-        headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
-    )
-
-    # Tentar consulta INSS com o token JWT
-    # O JWT pode ser gerado apos a busca pelo CPF
-    # Tentamos obter via buscar-propostas ou consulta direta
-    resp = await client.post(
-        f"{GESTAO_BASE}/index.php/esteira-consultas/buscar-propostas",
-        data={"cpf": cpf},
-        headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
-    )
-
-    if resp.status_code == 200:
+    # Extrair JWT que tem cliente_nb
+    jwts = re.findall(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r.text)
+    for jwt in jwts:
         try:
-            data = resp.json()
-            if data:
-                logger.info("Dados obtidos via buscar-propostas")
-                return data
+            payload = jwt.split(".")[1] + "===="
+            decoded = json.loads(base64.urlsafe_b64decode(payload))
+            if "cliente_nb" in decoded:
+                logger.info(f"JWT com cliente_nb obtido")
+                return jwt
         except Exception:
-            pass
+            continue
 
+    logger.error("JWT com cliente_nb nao encontrado")
+    return ""
+
+
+async def _buscar_beneficios(client: httpx.AsyncClient, cpf: str) -> list[str]:
+    """
+    Busca os numeros de beneficio (NB) de um CPF.
+    Retorna lista de NBs (10 digitos).
+    """
+    r = await client.post(
+        f"{GESTAO_BASE}/index.php/receptivo/consultar-cliente",
+        data={"beneficio": "", "cpfcli": cpf},
+        headers={**BROWSER_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=True,
+    )
+    # Procurar NBs (10 digitos) no contexto de selecionarBeneficio
+    nbs = re.findall(r"selecionarBeneficio\(['\"]?(\d{10})['\"]?\)", r.text)
+    if nbs:
+        logger.info(f"Beneficios encontrados: {nbs}")
+        return list(set(nbs))
+
+    # Fallback: procurar NBs genericos
+    nbs = re.findall(r"(\d{10})", r.text)
+    # Filtrar apenas NBs plausíveis (nao telefones, etc.)
+    nbs_filtrados = [nb for nb in set(nbs) if nb[0] in "0123456789" and not nb.startswith("55")]
+    if nbs_filtrados:
+        logger.info(f"Beneficios (fallback): {nbs_filtrados[:5]}")
+        return nbs_filtrados[:5]
+
+    return []
+
+
+async def _consultar_inss(client: httpx.AsyncClient, jwt: str) -> dict | None:
+    """Consulta API INSS com JWT Bearer."""
+    r = await client.post(
+        f"{SERVICES_BASE}/consulta-inss/consultar",
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": GESTAO_BASE,
+        },
+    )
+    if r.status_code == 200:
+        data = r.json()
+        if data.get("Beneficiario", {}).get("Nome"):
+            return data
+    logger.error(f"Consulta INSS falhou: {r.status_code}")
     return None
 
 
 def _parse_consulta(data: dict) -> tuple[DadosBeneficio, list[Emprestimo]]:
-    """
-    Parseia o JSON da consulta INSS para os modelos internos.
-    """
+    """Parseia o JSON da consulta INSS para modelos internos."""
     ben_data = data.get("Beneficiario", {})
+    especie_raw = ben_data.get("Especie", "")
+
     beneficio = DadosBeneficio(
         idade=ben_data.get("Idade"),
         nascimento=ben_data.get("DataNascimento"),
-        codigo_beneficio=str(ben_data.get("Especie", "")).split(" - ")[0].strip() if ben_data.get("Especie") else None,
-        especie=ben_data.get("Especie"),
+        codigo_beneficio=especie_raw.split(" - ")[0].strip() if especie_raw else None,
+        especie=especie_raw,
     )
 
     emprestimos = []
-    emp_list = data.get("Emprestimos", {}).get("Emprestimo", [])
-
-    for emp_data in emp_list:
-        tipo = emp_data.get("Tipo", "")
-        # Ignorar cartoes e RCC, apenas emprestimos consignados
-        if tipo not in ("Emprestimo",):
+    for emp_data in data.get("Emprestimos", {}).get("Emprestimo", []):
+        if emp_data.get("Tipo") != "Emprestimo":
             continue
 
-        parcela = emp_data.get("Valor")
-        quitacao = emp_data.get("Quitacao")
-        prazo = emp_data.get("Prazo", 0)
-        restantes = emp_data.get("ParcelasRestantes", 0)
-
-        # Converter valores
         try:
-            parcela = float(parcela) if parcela else 0
+            parcela = float(emp_data.get("Valor", 0))
         except (ValueError, TypeError):
             parcela = 0
 
         try:
-            saldo = float(quitacao) if quitacao and str(quitacao) != "NaN" else 0
+            saldo_str = str(emp_data.get("Quitacao", "0"))
+            saldo = float(saldo_str) if saldo_str != "NaN" else 0
         except (ValueError, TypeError):
             saldo = 0
 
@@ -207,79 +176,67 @@ def _parse_consulta(data: dict) -> tuple[DadosBeneficio, list[Emprestimo]]:
         except (ValueError, TypeError):
             taxa = 0
 
+        prazo = emp_data.get("Prazo", 0) or 0
+        restantes = emp_data.get("ParcelasRestantes", 0) or 0
         parcelas_pagas = max(0, prazo - restantes)
 
-        codigo_banco = str(emp_data.get("Banco", "")).zfill(3)
-
-        emp = Emprestimo(
-            codigo_banco=codigo_banco,
-            nome_banco=f"Banco {codigo_banco}",
+        emprestimos.append(Emprestimo(
+            codigo_banco=str(emp_data.get("Banco", "")).zfill(3),
+            nome_banco=f"Banco {str(emp_data.get('Banco', '')).zfill(3)}",
             taxa_juros=taxa,
             saldo_devedor=saldo,
             parcelas_pagas=parcelas_pagas,
             valor_parcela=parcela,
-        )
-        emprestimos.append(emp)
+        ))
 
     return beneficio, emprestimos
 
 
 async def coletar_dados_cliente_async(cpf: str) -> DadosCliente:
-    """
-    Fluxo completo async: login -> busca CPF -> coleta dados via API HTTP.
-    """
+    """Fluxo completo: login -> busca beneficios -> consulta INSS."""
     cpf_limpo = cpf.replace(".", "").replace("-", "").replace(" ", "")
 
     try:
-        async with httpx.AsyncClient(
-            timeout=60,
-            follow_redirects=True,
-            verify=True,
-        ) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             # 1. Login
-            token = await _login(client)
-            if not token:
+            if not await _login(client):
                 return DadosCliente(cpf=cpf_limpo, erro="Falha no login do Sistema Corban")
 
-            # 2. Tentar buscar dados via API
-            # Primeiro tenta buscar-propostas pelo gestao
-            data = await _buscar_e_consultar(client, cpf_limpo)
+            # 2. Buscar beneficios
+            nbs = await _buscar_beneficios(client, cpf_limpo)
+            if not nbs:
+                return DadosCliente(cpf=cpf_limpo, erro="Nenhum beneficio encontrado para este CPF")
 
-            if not data or "Beneficiario" not in (data or {}):
-                # Se nao conseguiu, tenta consulta INSS direta
-                # Para isso, precisamos do JWT Bearer token
-                # O token do verificarlogin pode nao ser JWT
-                # Tentamos consultar mesmo assim
-                data = await _consultar_inss(client, cpf_limpo, token)
+            # 3. Para cada beneficio, obter JWT e consultar
+            # (normalmente 1 beneficio, mas pode ter mais)
+            todos_emprestimos = []
+            beneficio_final = None
 
-            if not data or "Beneficiario" not in (data or {}):
-                return DadosCliente(
-                    cpf=cpf_limpo,
-                    erro="Nao foi possivel obter dados do INSS para este CPF",
-                )
+            for nb in nbs[:3]:  # Max 3 beneficios
+                jwt = await _obter_jwt(client, cpf_limpo, nb)
+                if not jwt:
+                    continue
 
-            # 3. Parsear dados
-            beneficio, emprestimos = _parse_consulta(data)
+                data = await _consultar_inss(client, jwt)
+                if not data:
+                    continue
+
+                beneficio_info, emprestimos = _parse_consulta(data)
+                if not beneficio_final:
+                    beneficio_final = beneficio_info
+                todos_emprestimos.extend(emprestimos)
 
             logger.info(
-                f"Dados coletados via API: {len(emprestimos)} emprestimos, "
-                f"idade={beneficio.idade}, especie={beneficio.codigo_beneficio}"
+                f"Dados coletados: {len(todos_emprestimos)} emprestimos, "
+                f"idade={beneficio_final.idade if beneficio_final else '?'}"
             )
 
             return DadosCliente(
                 cpf=cpf_limpo,
-                beneficio=beneficio,
-                emprestimos=emprestimos,
+                beneficio=beneficio_final,
+                emprestimos=todos_emprestimos,
             )
 
     except Exception as e:
         logger.exception("Erro ao coletar dados via API")
         return DadosCliente(cpf=cpf_limpo, erro=str(e))
-
-
-def coletar_dados_cliente(cpf: str) -> DadosCliente:
-    """
-    Wrapper sincrono para compatibilidade com asyncio.to_thread().
-    """
-    import asyncio
-    return asyncio.run(coletar_dados_cliente_async(cpf))
