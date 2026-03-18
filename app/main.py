@@ -25,7 +25,7 @@ from app.models import (
     StatusJob,
     StatusProcessamento,
 )
-from app.scraper import coletar_dados_cliente
+from app.scraper import coletar_dados_cliente_async
 from app.simulador import processar_cliente
 from app.ghl import atualizar_contato_simulacao, adicionar_tag
 
@@ -124,7 +124,7 @@ async def _processar_ghl_background(cpf: str, contact_id: str):
         logger.info(f"[GHL BG] Iniciando processamento CPF contact_id={contact_id}")
 
         # 1. Scraping
-        dados = await asyncio.to_thread(coletar_dados_cliente, cpf)
+        dados = await coletar_dados_cliente_async(cpf)
 
         # 2. Simulacao
         resultado = processar_cliente(dados, contact_id=contact_id)
@@ -160,7 +160,7 @@ async def processar_cpf(req: ProcessarClienteRequest):
     logger.info(f"Processando CPF (contact_id={req.contact_id})")
 
     # 1. Scraping (roda em thread separada para nao bloquear o event loop)
-    dados = await asyncio.to_thread(coletar_dados_cliente, req.cpf)
+    dados = await coletar_dados_cliente_async(req.cpf)
 
     # 2. Simulacao com regras e prioridade de bancos
     resultado = processar_cliente(dados, contact_id=req.contact_id)
@@ -210,7 +210,7 @@ async def _processar_lista_background(
         try:
             logger.info(f"[Job {job_id}] Processando CPF (contact_id={cliente.contact_id})")
 
-            dados = await asyncio.to_thread(coletar_dados_cliente, cliente.cpf)
+            dados = await coletar_dados_cliente_async(cliente.cpf)
             resultado = processar_cliente(dados, contact_id=cliente.contact_id)
 
             # GHL
