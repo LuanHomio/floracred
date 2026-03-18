@@ -94,6 +94,13 @@ async def webhook_ghl(request: Request, bg: BackgroundTasks):
         or (body.get("customData") or {}).get("CPF", "")
     )
 
+    # Extrair Numero do Beneficio (NB)
+    nb = (
+        body.get("Número do Benefício", "")
+        or body.get("numero_do_beneficio", "")
+        or (body.get("customData") or {}).get("nb", "")
+    )
+
     if not cpf:
         logger.warning(f"Webhook GHL recebido sem CPF: contact_id={contact_id}")
         return {"status": "erro", "mensagem": "CPF nao encontrado no payload"}
@@ -105,10 +112,10 @@ async def webhook_ghl(request: Request, bg: BackgroundTasks):
     # Limpar CPF
     cpf_limpo = cpf.replace(".", "").replace("-", "").replace(" ", "")
 
-    logger.info(f"Webhook GHL: CPF={cpf_limpo}, contact_id={contact_id}")
+    logger.info(f"Webhook GHL: CPF={cpf_limpo}, NB={nb}, contact_id={contact_id}")
 
     # Processar em background para responder rapido ao GHL
-    bg.add_task(_processar_ghl_background, cpf_limpo, contact_id)
+    bg.add_task(_processar_ghl_background, cpf_limpo, contact_id, nb)
 
     return {
         "status": "recebido",
@@ -118,13 +125,13 @@ async def webhook_ghl(request: Request, bg: BackgroundTasks):
     }
 
 
-async def _processar_ghl_background(cpf: str, contact_id: str):
+async def _processar_ghl_background(cpf: str, contact_id: str, nb: str = ""):
     """Processa um CPF recebido via webhook GHL."""
     try:
         logger.info(f"[GHL BG] Iniciando processamento CPF contact_id={contact_id}")
 
-        # 1. Scraping
-        dados = await coletar_dados_cliente_async(cpf)
+        # 1. Consulta via Supabase Edge Function
+        dados = await coletar_dados_cliente_async(cpf, nb=nb)
 
         # 2. Simulacao
         resultado = processar_cliente(dados, contact_id=contact_id)
