@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  floracred-api:
+    build: .
+    container_name: floracred-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - CHROME_BIN=/usr/bin/google-chrome
+    shm_size: "2gb"  # Necessario para Chrome headless
+    deploy:
+      resources:
+        limits:
+          memory: 4g
